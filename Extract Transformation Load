@@ -1,0 +1,54 @@
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("MovieReviewETL").getOrCreate()
+
+# Ingest raw data
+ratings_df = spark.read.option("header", True).csv("dbfs:/FileStore/etl 1/ratings.csv")
+movies_df = spark.read.option("header", True).csv("dbfs:/FileStore/etl 1/movies.csv")
+reviews_df = spark.read.option("header", True).csv("dbfs:/FileStore/etl 1/reviews.csv")
+
+# Save raw data in Parquet format
+ratings_df.write.mode("overwrite").parquet("dbfs:/etl 1/bronze/ratings/")
+movies_df.write.mode("overwrite").parquet("dbfs:/etl 1/bronze/movies/")
+reviews_df.write.mode("overwrite").parquet("dbfs:/etl 1/bronze/reviews/")
+
+from pyspark.sql.functions import col, to_date
+
+# Load Bronze
+ratings_df = spark.read.parquet("dbfs:/etl 1/bronze/ratings/")
+movies_df = spark.read.parquet("dbfs:/etl 1/bronze/movies/")
+reviews_df = spark.read.parquet("dbfs:/etl 1/bronze/reviews/")
+
+# Transformations
+ratings_df = ratings_df.dropna().withColumn("rating", col("rating").cast("float"))
+ratings_df = ratings_df.withColumn("timestamp", to_date("timestamp"))
+
+movies_df = movies_df.dropna()
+reviews_df = reviews_df.dropna().dropDuplicates(["user_id", "movie_id"])
+
+# Save as Silver layer
+ratings_df.write.mode("overwrite").parquet("dbfs:/etl 1/silver/ratings_clean/")
+movies_df.write.mode("overwrite").parquet("dbfs:/etl 1/silver/movies_clean/")
+reviews_df.write.mode("overwrite").parquet("dbfs:/etl 1/silver/reviews_clean/")
+
+from pyspark.sql.functions import avg
+
+# Load Silver data
+ratings_df = spark.read.parquet("dbfs:/etl 1/silver/ratings_clean/")
+movies_df = spark.read.parquet("dbfs:/etl 1/silver/movies_clean/")
+reviews_df = spark.read.parquet("dbfs:/etl 1/silver/reviews_clean/")
+
+# Join all data
+combined_df = ratings_df.join(movies_df, "movie_id", "inner") \
+                        .join(reviews_df, ["user_id", "movie_id"], "left")
+
+# Calculate average rating per movie
+avg_ratings = ratings_df.groupBy("movie_id").agg(avg("rating").alias("avg_rating"))
+
+# Final Gold Layer Table
+gold_df = combined_df.join(avg_ratings, "movie_id", "inner") \
+                     .select("movie_id", "title", "genre", "user_id", "rating", "review_text", "avg_rating")
+
+# Save Gold Layer
+gold_df.write.mode("overwrite").parquet("dbfs:/etl 1/gold/movie_reviews/")
+
